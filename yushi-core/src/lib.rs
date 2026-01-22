@@ -8,11 +8,15 @@ mod downloader;
 mod queue;
 mod state;
 mod types;
+mod utils;
 
 // 重新导出公共 API
 pub use downloader::YuShi;
 pub use queue::DownloadQueue;
-pub use types::{DownloadTask, ProgressEvent, QueueEvent, TaskStatus};
+pub use types::{
+    ChecksumType, DownloadConfig, DownloadTask, Priority, ProgressEvent, QueueEvent, TaskStatus,
+};
+pub use utils::{auto_rename, verify_file, SpeedCalculator};
 
 #[cfg(test)]
 mod tests {
@@ -77,9 +81,17 @@ mod tests {
                         task_id,
                         downloaded,
                         total,
+                        speed,
+                        eta,
                     } => {
                         let progress = (downloaded as f64 / total as f64) * 100.0;
-                        println!("Task {} progress: {:.2}%", task_id, progress);
+                        let speed_mb = speed as f64 / 1024.0 / 1024.0;
+                        print!("Task {} progress: {:.2}% ({:.2} MB/s", task_id, progress, speed_mb);
+                        if let Some(eta_secs) = eta {
+                            println!(", ETA: {}s)", eta_secs);
+                        } else {
+                            println!(")");
+                        }
                     }
                     QueueEvent::TaskCompleted { task_id } => {
                         println!("Task completed: {}", task_id);
@@ -95,6 +107,12 @@ mod tests {
                     }
                     QueueEvent::TaskCancelled { task_id } => {
                         println!("Task cancelled: {}", task_id);
+                    }
+                    QueueEvent::VerifyStarted { task_id } => {
+                        println!("Verifying task: {}", task_id);
+                    }
+                    QueueEvent::VerifyCompleted { task_id, success } => {
+                        println!("Task {} verification: {}", task_id, if success { "passed" } else { "failed" });
                     }
                 }
             }

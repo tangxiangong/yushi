@@ -1,7 +1,11 @@
 use crate::{
     downloader::YuShi,
     state::QueueState,
-    types::{DownloadTask, ProgressEvent, QueueEvent, TaskStatus},
+    types::{
+        ChecksumType, DownloadCallback, DownloadTask, Priority, ProgressEvent, QueueEvent,
+        TaskStatus,
+    },
+    utils::{SpeedCalculator, auto_rename, verify_file},
 };
 use anyhow::{Result, anyhow};
 use fs_err::tokio as fs;
@@ -20,6 +24,7 @@ pub struct DownloadQueue {
     max_concurrent_tasks: usize,
     queue_state_path: PathBuf,
     event_tx: mpsc::Sender<QueueEvent>,
+    on_complete: Option<DownloadCallback>,
 }
 
 impl DownloadQueue {
@@ -46,9 +51,21 @@ impl DownloadQueue {
             max_concurrent_tasks,
             queue_state_path,
             event_tx,
+            on_complete: None,
         };
 
         (queue, event_rx)
+    }
+
+    /// 设置下载完成回调
+    pub fn set_on_complete<F, Fut>(&mut self, callback: F)
+    where
+        F: Fn(String, Result<(), String>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.on_complete = Some(Arc::new(move |task_id, result| {
+            Box::pin(callback(task_id, result))
+        }));
     }
 
     /// 从持久化状态加载队列
@@ -81,6 +98,34 @@ impl DownloadQueue {
     /// # 返回
     /// 返回任务 ID
     pub async fn add_task(&self, url: String, dest: PathBuf) -> Result<String> {
+        self.add_task_with_options(url, dest, Priority::Normal, None, false)
+            .await
+    }
+
+    /// 添加下载任务（带选项）
+    ///
+    /// # 参数
+    /// * `url` - 下载 URL
+    /// * `dest` - 目标文件路径
+    /// * `priority` - 任务优先级
+    /// * `checksum` - 文件校验（可选）
+    /// * `auto_rename_on_conflict` - 是否自动重命名冲突文件
+    ///
+    /// # 返回
+    /// 返回任务 ID
+    pub async fn add_task_with_options(
+        &self,
+        url: String,
+        mut dest: PathBuf,
+        priority: Priority,
+        checksum: Option<ChecksumType>,
+        auto_rename_on_conflict: bool,
+    ) -> Result<String> {
+        // 自动重命名
+        if auto_rename_on_conflict && dest.exists() {
+            dest = auto_rename(&dest);
+        }
+
         let task_id = Uuid::new_v4().to_string();
 
         let task = DownloadTask {
@@ -95,6 +140,11 @@ impl DownloadQueue {
                 .unwrap()
                 .as_secs(),
             error: None,
+            priority,
+            speed: 0,
+            eta: None,
+            headers: HashMap::new(),
+            checksum,
         };
 
         {
@@ -116,23 +166,26 @@ impl DownloadQueue {
         Ok(task_id)
     }
 
-    /// 处理队列，启动待处理的任务
+    /// 处理队列，启动待处理的任务（按优先级排序）
     async fn process_queue(&self) -> Result<()> {
         let active_count = self.active_downloads.read().await.len();
         if active_count >= self.max_concurrent_tasks {
             return Ok(());
         }
 
-        let pending_tasks: Vec<String> = {
+        let mut pending_tasks: Vec<(String, Priority)> = {
             let tasks = self.tasks.read().await;
             tasks
                 .values()
                 .filter(|t| t.status == TaskStatus::Pending)
-                .map(|t| t.id.clone())
+                .map(|t| (t.id.clone(), t.priority))
                 .collect()
         };
 
-        for task_id in pending_tasks
+        // 按优先级排序（高优先级在前）
+        pending_tasks.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (task_id, _) in pending_tasks
             .iter()
             .take(self.max_concurrent_tasks - active_count)
         {
@@ -172,6 +225,7 @@ impl DownloadQueue {
         let queue_event_tx = self.event_tx.clone();
         let task_id_owned = task_id.to_string();
         let queue_state_path = self.queue_state_path.clone();
+        let on_complete = self.on_complete.clone();
 
         let handle = tokio::spawn(async move {
             let (tx, mut rx) = mpsc::channel(1024);
@@ -183,6 +237,7 @@ impl DownloadQueue {
             tokio::spawn(async move {
                 let mut total = 0u64;
                 let mut downloaded = 0u64;
+                let mut speed_calc = SpeedCalculator::new();
 
                 while let Some(event) = rx.recv().await {
                     match event {
@@ -195,15 +250,25 @@ impl DownloadQueue {
                         }
                         ProgressEvent::ChunkUpdated { delta, .. } => {
                             downloaded += delta;
+
+                            // 更新速度统计
+                            let speed = speed_calc.update(downloaded);
+                            let eta = speed_calc.calculate_eta(downloaded, total);
+
                             let mut tasks = tasks_clone.write().await;
                             if let Some(task) = tasks.get_mut(&task_id_clone) {
                                 task.downloaded = downloaded;
+                                task.speed = speed;
+                                task.eta = eta;
                             }
+
                             let _ = queue_event_tx_clone
                                 .send(QueueEvent::TaskProgress {
                                     task_id: task_id_clone.clone(),
                                     downloaded,
                                     total,
+                                    speed,
+                                    eta,
                                 })
                                 .await;
                         }
@@ -218,10 +283,49 @@ impl DownloadQueue {
                 .download(&task.url, task.dest.to_str().unwrap(), tx)
                 .await;
 
-            // 更新任务状态
+            // 文件校验
+            let checksum = task.checksum.clone();
+            let dest_path = task.dest.clone();
+            let verify_result = if result.is_ok() {
+                if let Some(checksum_value) = checksum {
+                    let _ = queue_event_tx
+                        .send(QueueEvent::VerifyStarted {
+                            task_id: task_id_owned.clone(),
+                        })
+                        .await;
+
+                    match verify_file(&dest_path, &checksum_value).await {
+                        Ok(success) => {
+                            let _ = queue_event_tx
+                                .send(QueueEvent::VerifyCompleted {
+                                    task_id: task_id_owned.clone(),
+                                    success,
+                                })
+                                .await;
+                            if success {
+                                Ok(())
+                            } else {
+                                Err(anyhow!("Checksum verification failed"))
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    result
+                }
+            } else {
+                result
+            };
+
+            // 更新任务状态并调用回调
+            let callback_result = match &verify_result {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+
             let mut tasks = tasks.write().await;
             if let Some(task) = tasks.get_mut(&task_id_owned) {
-                match result {
+                match verify_result {
                     Ok(_) => {
                         task.status = TaskStatus::Completed;
                         let _ = queue_event_tx
@@ -248,6 +352,11 @@ impl DownloadQueue {
             let state = QueueState { tasks: task_list };
             if let Ok(data) = serde_json::to_string_pretty(&state) {
                 let _ = fs::write(&queue_state_path, data).await;
+            }
+
+            // 调用完成回调
+            if let Some(callback) = on_complete {
+                callback(task_id_owned.clone(), callback_result).await;
             }
 
             // 从活动下载中移除

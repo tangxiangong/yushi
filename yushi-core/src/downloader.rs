@@ -1,22 +1,22 @@
 use crate::{
     state::{ChunkState, DownloadState},
-    types::ProgressEvent,
+    types::{DownloadConfig, ProgressEvent},
+    utils::SpeedLimiter,
 };
 use anyhow::{Result, anyhow};
 use fs_err::tokio as fs;
 use futures::StreamExt;
-use reqwest::header::{CONTENT_LENGTH, RANGE};
+use reqwest::header::{CONTENT_LENGTH, RANGE, USER_AGENT};
 use std::{path::Path, sync::Arc};
 use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt, SeekFrom},
-    sync::{Semaphore, mpsc},
+    sync::{RwLock as TokioRwLock, Semaphore, mpsc},
 };
 
 /// 单文件下载器
 pub struct YuShi {
     client: reqwest::Client,
-    max_concurrent: usize,
-    chunk_size: u64,
+    config: DownloadConfig,
 }
 
 impl YuShi {
@@ -25,14 +25,29 @@ impl YuShi {
     /// # 参数
     /// * `max_concurrent` - 最大并发连接数（分块下载）
     pub fn new(max_concurrent: usize) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .tcp_keepalive(std::time::Duration::from_secs(60))
-                .build()
-                .unwrap(),
+        let config = DownloadConfig {
             max_concurrent,
-            chunk_size: 10 * 1024 * 1024, // 10MB per chunk
+            ..Default::default()
+        };
+        Self::with_config(config)
+    }
+
+    /// 使用自定义配置创建下载器
+    pub fn with_config(config: DownloadConfig) -> Self {
+        let mut builder = reqwest::Client::builder()
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(config.timeout));
+
+        // 设置代理
+        if let Some(proxy_url) = &config.proxy
+            && let Ok(proxy) = reqwest::Proxy::all(proxy_url)
+        {
+            builder = builder.proxy(proxy);
         }
+
+        let client = builder.build().unwrap();
+
+        Self { client, config }
     }
 
     /// 下载文件
@@ -60,7 +75,8 @@ impl YuShi {
             .send(ProgressEvent::Initialized { total_size })
             .await;
 
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
+        let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent));
+        let speed_limiter = Arc::new(TokioRwLock::new(SpeedLimiter::new(self.config.speed_limit)));
         let mut workers = Vec::new();
 
         let chunks_count = { state.read().await.chunks.len() };
@@ -72,11 +88,24 @@ impl YuShi {
             let dest_c = dest_path.clone();
             let state_file_c = state_path.clone();
             let tx_c = event_tx.clone();
+            let speed_limiter_c = Arc::clone(&speed_limiter);
+            let headers = self.config.headers.clone();
+            let user_agent = self.config.user_agent.clone();
 
             workers.push(tokio::spawn(async move {
-                let res =
-                    Self::download_chunk(i, client_c, url_c, dest_c, state_file_c, state_c, tx_c)
-                        .await;
+                let res = Self::download_chunk(
+                    i,
+                    client_c,
+                    url_c,
+                    dest_c,
+                    state_file_c,
+                    state_c,
+                    tx_c,
+                    speed_limiter_c,
+                    headers,
+                    user_agent,
+                )
+                .await;
                 drop(permit);
                 res
             }));
@@ -91,6 +120,7 @@ impl YuShi {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// 下载单个分块
     async fn download_chunk(
         index: usize,
@@ -100,6 +130,9 @@ impl YuShi {
         state_file: std::path::PathBuf,
         state_lock: Arc<tokio::sync::RwLock<DownloadState>>,
         tx: mpsc::Sender<ProgressEvent>,
+        speed_limiter: Arc<TokioRwLock<SpeedLimiter>>,
+        headers: std::collections::HashMap<String, String>,
+        user_agent: Option<String>,
     ) -> Result<()> {
         let (start_pos, end_pos) = {
             let s = state_lock.read().await;
@@ -114,11 +147,21 @@ impl YuShi {
         const MAX_RETRIES: u32 = 5;
 
         loop {
-            let res = client
+            let mut request = client
                 .get(&url)
-                .header(RANGE, format!("bytes={}-{}", start_pos, end_pos))
-                .send()
-                .await;
+                .header(RANGE, format!("bytes={}-{}", start_pos, end_pos));
+
+            // 添加自定义头
+            for (key, value) in &headers {
+                request = request.header(key, value);
+            }
+
+            // 添加 User-Agent
+            if let Some(ua) = &user_agent {
+                request = request.header(USER_AGENT, ua);
+            }
+
+            let res = request.send().await;
 
             match res {
                 Ok(resp) if resp.status().is_success() => {
@@ -134,6 +177,9 @@ impl YuShi {
 
                         let len = chunk_data.len() as u64;
                         current_idx += len;
+
+                        // 速度限制
+                        speed_limiter.write().await.wait(len).await;
 
                         // 更新内存状态
                         {
@@ -201,7 +247,7 @@ impl YuShi {
         let mut curr = 0;
         let mut idx = 0;
         while curr < total_size {
-            let end = (curr + self.chunk_size - 1).min(total_size - 1);
+            let end = (curr + self.config.chunk_size - 1).min(total_size - 1);
             chunks.push(ChunkState {
                 index: idx,
                 start: curr,
@@ -209,7 +255,7 @@ impl YuShi {
                 current: curr,
                 is_finished: false,
             });
-            curr += self.chunk_size;
+            curr += self.config.chunk_size;
             idx += 1;
         }
 

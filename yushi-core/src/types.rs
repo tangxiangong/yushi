@@ -1,5 +1,27 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
+/// 下载完成回调类型
+pub type DownloadCallback = Arc<
+    dyn Fn(
+            String,
+            Result<(), String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// 任务优先级
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub enum Priority {
+    /// 低优先级
+    Low = 0,
+    #[default]
+    /// 普通优先级
+    Normal = 1,
+    /// 高优先级
+    High = 2,
+}
 
 /// 任务状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +38,15 @@ pub enum TaskStatus {
     Failed,
     /// 已取消
     Cancelled,
+}
+
+/// 文件校验类型
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChecksumType {
+    /// MD5 校验
+    Md5(String),
+    /// SHA256 校验
+    Sha256(String),
 }
 
 /// 下载任务
@@ -37,6 +68,21 @@ pub struct DownloadTask {
     pub created_at: u64,
     /// 错误信息（如果失败）
     pub error: Option<String>,
+    /// 任务优先级
+    #[serde(default)]
+    pub priority: Priority,
+    /// 当前下载速度（字节/秒）
+    #[serde(default)]
+    pub speed: u64,
+    /// 预计剩余时间（秒）
+    #[serde(default)]
+    pub eta: Option<u64>,
+    /// 自定义 HTTP 头
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// 文件校验
+    #[serde(default)]
+    pub checksum: Option<ChecksumType>,
 }
 
 /// 队列事件
@@ -51,6 +97,8 @@ pub enum QueueEvent {
         task_id: String,
         downloaded: u64,
         total: u64,
+        speed: u64,
+        eta: Option<u64>,
     },
     /// 任务完成
     TaskCompleted { task_id: String },
@@ -62,6 +110,10 @@ pub enum QueueEvent {
     TaskResumed { task_id: String },
     /// 任务取消
     TaskCancelled { task_id: String },
+    /// 校验开始
+    VerifyStarted { task_id: String },
+    /// 校验完成
+    VerifyCompleted { task_id: String, success: bool },
 }
 
 /// 单文件下载进度事件
@@ -75,4 +127,37 @@ pub enum ProgressEvent {
     Finished,
     /// 下载失败
     Failed(String),
+}
+
+/// 下载配置
+#[derive(Debug, Clone)]
+pub struct DownloadConfig {
+    /// 最大并发连接数
+    pub max_concurrent: usize,
+    /// 分块大小（字节）
+    pub chunk_size: u64,
+    /// 速度限制（字节/秒），None 表示不限速
+    pub speed_limit: Option<u64>,
+    /// 自定义 HTTP 头
+    pub headers: HashMap<String, String>,
+    /// 代理 URL
+    pub proxy: Option<String>,
+    /// 连接超时（秒）
+    pub timeout: u64,
+    /// 用户代理
+    pub user_agent: Option<String>,
+}
+
+impl Default for DownloadConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 4,
+            chunk_size: 10 * 1024 * 1024, // 10MB
+            speed_limit: None,
+            headers: HashMap::new(),
+            proxy: None,
+            timeout: 30,
+            user_agent: Some("YuShi/1.0".to_string()),
+        }
+    }
 }
