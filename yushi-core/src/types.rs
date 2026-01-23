@@ -86,7 +86,8 @@ pub struct DownloadTask {
 }
 
 /// 队列事件
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
 pub enum QueueEvent {
     /// 任务已添加
     TaskAdded { task_id: String },
