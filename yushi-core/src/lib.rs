@@ -16,7 +16,7 @@ pub use queue::DownloadQueue;
 pub use types::{
     ChecksumType, DownloadConfig, DownloadTask, Priority, ProgressEvent, QueueEvent, TaskStatus,
 };
-pub use utils::{auto_rename, verify_file, SpeedCalculator};
+pub use utils::{SpeedCalculator, auto_rename, verify_file};
 
 #[cfg(test)]
 mod tests {
@@ -86,7 +86,10 @@ mod tests {
                     } => {
                         let progress = (downloaded as f64 / total as f64) * 100.0;
                         let speed_mb = speed as f64 / 1024.0 / 1024.0;
-                        print!("Task {} progress: {:.2}% ({:.2} MB/s", task_id, progress, speed_mb);
+                        print!(
+                            "Task {} progress: {:.2}% ({:.2} MB/s",
+                            task_id, progress, speed_mb
+                        );
                         if let Some(eta_secs) = eta {
                             println!(", ETA: {}s)", eta_secs);
                         } else {
@@ -112,7 +115,11 @@ mod tests {
                         println!("Verifying task: {}", task_id);
                     }
                     QueueEvent::VerifyCompleted { task_id, success } => {
-                        println!("Task {} verification: {}", task_id, if success { "passed" } else { "failed" });
+                        println!(
+                            "Task {} verification: {}",
+                            task_id,
+                            if success { "passed" } else { "failed" }
+                        );
                     }
                 }
             }
