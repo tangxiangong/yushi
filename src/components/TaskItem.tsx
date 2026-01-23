@@ -8,6 +8,7 @@ import {
   FileIcon,
   Pause,
   Play,
+  RefreshCw,
   Trash2,
   X,
 } from "lucide-react";
@@ -237,13 +238,23 @@ export function TaskItem({ task, onRefreshNeeded }: TaskItemProps) {
                 <Pause className="w-4 h-4" />
               </button>
             )}
-            {(task.status === "Paused" || task.status === "Failed") && (
+            {task.status === "Paused" && (
               <button
                 onClick={handleResume}
                 className="btn btn-sm btn-ghost btn-square hover:bg-primary/10 hover:text-primary transition-all duration-200"
                 title="继续"
               >
                 <Play className="w-4 h-4" />
+              </button>
+            )}
+            {task.status === "Failed" && (
+              <button
+                onClick={handleResume}
+                className="btn btn-sm btn-warning hover:btn-primary transition-all duration-200 gap-1"
+                title="重试下载"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span className="hidden sm:inline">重试</span>
               </button>
             )}
             {(task.status === "Downloading" || task.status === "Paused" ||
