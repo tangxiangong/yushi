@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use console::style;
 use std::path::PathBuf;
-use yushi_core::{ChecksumType, DownloadQueue, Priority, QueueEvent};
+use yushi_core::{ChecksumType, Priority, QueueEvent, YuShi};
 
 pub async fn execute(args: QueueArgs) -> Result<()> {
     match args.command {
@@ -38,10 +38,10 @@ async fn add_task(
     sha256: Option<String>,
 ) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
     // 加载现有队列
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
 
     // 解析优先级
     let priority = match priority_str.to_lowercase().as_str() {
@@ -74,9 +74,9 @@ async fn add_task(
 
 async fn list_tasks() -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
     let tasks = queue.get_all_tasks().await;
 
     if tasks.is_empty() {
@@ -136,9 +136,9 @@ async fn list_tasks() -> Result<()> {
 
 async fn start_queue(max_tasks: usize, connections: usize) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, mut event_rx) = DownloadQueue::new(connections, max_tasks, queue_path);
+    let (queue, mut event_rx) = YuShi::new_with_queue(connections, max_tasks, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
 
     let tasks = queue.get_all_tasks().await;
     let pending_count = tasks
@@ -216,9 +216,9 @@ async fn start_queue(max_tasks: usize, connections: usize) -> Result<()> {
 
 async fn pause_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
     queue.pause_task(&task_id).await?;
 
     print_success(&format!("任务已暂停: {}", &task_id[..16]));
@@ -227,9 +227,9 @@ async fn pause_task(task_id: String) -> Result<()> {
 
 async fn resume_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
     queue.resume_task(&task_id).await?;
 
     print_success(&format!("任务已恢复: {}", &task_id[..16]));
@@ -238,9 +238,9 @@ async fn resume_task(task_id: String) -> Result<()> {
 
 async fn cancel_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
     queue.cancel_task(&task_id).await?;
 
     print_success(&format!("任务已取消: {}", &task_id[..16]));
@@ -249,9 +249,9 @@ async fn cancel_task(task_id: String) -> Result<()> {
 
 async fn remove_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
     queue.remove_task(&task_id).await?;
 
     print_success(&format!("任务已移除: {}", &task_id[..16]));
@@ -260,9 +260,9 @@ async fn remove_task(task_id: String) -> Result<()> {
 
 async fn clear_completed() -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = DownloadQueue::new(4, 1, queue_path);
+    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
 
-    queue.load_from_state().await?;
+    queue.load_queue_from_state().await?;
     queue.clear_completed().await?;
 
     print_success("已清空所有已完成任务");

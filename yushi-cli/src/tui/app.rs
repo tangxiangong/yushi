@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-use yushi_core::{DownloadQueue, DownloadTask, Priority, QueueEvent, TaskStatus};
+use yushi_core::{DownloadTask, Priority, QueueEvent, TaskStatus, YuShi};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -17,7 +17,7 @@ pub enum SelectedPanel {
 }
 
 pub struct App {
-    pub queue: DownloadQueue,
+    pub queue: YuShi,
     pub tasks: Vec<DownloadTask>,
     pub selected_index: usize,
     pub input_mode: InputMode,
@@ -29,8 +29,8 @@ pub struct App {
 
 impl App {
     pub async fn new(queue_path: PathBuf) -> Result<Self> {
-        let (queue, event_rx) = DownloadQueue::new(4, 2, queue_path);
-        queue.load_from_state().await?;
+        let (queue, event_rx) = YuShi::new_with_queue(4, 2, queue_path);
+        queue.load_queue_from_state().await?;
         let tasks = queue.get_all_tasks().await;
 
         Ok(Self {
@@ -107,28 +107,28 @@ impl App {
             }
             // 取消任务
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                if let Some(task) = self.tasks.get(self.selected_index) {
-                    if matches!(
+                if let Some(task) = self.tasks.get(self.selected_index)
+                    && matches!(
                         task.status,
                         TaskStatus::Pending | TaskStatus::Downloading | TaskStatus::Paused
-                    ) {
-                        self.queue.cancel_task(&task.id).await?;
-                        self.status_message = format!("已取消任务: {}", &task.id[..8]);
-                    }
+                    )
+                {
+                    self.queue.cancel_task(&task.id).await?;
+                    self.status_message = format!("已取消任务: {}", &task.id[..8]);
                 }
             }
             // 删除任务
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                if let Some(task) = self.tasks.get(self.selected_index) {
-                    if matches!(
+                if let Some(task) = self.tasks.get(self.selected_index)
+                    && matches!(
                         task.status,
                         TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
-                    ) {
-                        self.queue.remove_task(&task.id).await?;
-                        self.status_message = format!("已删除任务: {}", &task.id[..8]);
-                        if self.selected_index > 0 {
-                            self.selected_index -= 1;
-                        }
+                    )
+                {
+                    self.queue.remove_task(&task.id).await?;
+                    self.status_message = format!("已删除任务: {}", &task.id[..8]);
+                    if self.selected_index > 0 {
+                        self.selected_index -= 1;
                     }
                 }
             }
@@ -187,7 +187,7 @@ impl App {
             // 从 URL 提取文件名
             let filename = url
                 .split('/')
-                .last()
+                .next_back()
                 .and_then(|s| s.split('?').next())
                 .unwrap_or("download");
             PathBuf::from(filename)
@@ -226,10 +226,10 @@ impl App {
             match event {
                 QueueEvent::TaskProgress { task_id, .. } => {
                     // 更新任务进度
-                    if let Some(task) = self.queue.get_task(&task_id).await {
-                        if let Some(idx) = self.tasks.iter().position(|t| t.id == task_id) {
-                            self.tasks[idx] = task;
-                        }
+                    if let Some(task) = self.queue.get_task(&task_id).await
+                        && let Some(idx) = self.tasks.iter().position(|t| t.id == task_id)
+                    {
+                        self.tasks[idx] = task;
                     }
                 }
                 QueueEvent::TaskCompleted { task_id } => {

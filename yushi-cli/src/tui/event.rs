@@ -31,13 +31,11 @@ impl EventHandler {
                         }
                     }
                     _ = tokio::task::spawn_blocking(move || crossterm_event) => {
-                        if event::poll(Duration::from_secs(0)).unwrap_or(false) {
-                            if let Ok(CrosstermEvent::Key(key)) = event::read() {
-                                if event_tx.send(Event::Key(key)).is_err() {
+                        if event::poll(Duration::from_secs(0)).unwrap_or(false)
+                            && let Ok(CrosstermEvent::Key(key)) = event::read()
+                                && event_tx.send(Event::Key(key)).is_err() {
                                     break;
                                 }
-                            }
-                        }
                     }
                 }
             }

@@ -1,4 +1,5 @@
 use super::app::{App, InputMode, SelectedPanel};
+use crate::ui::format_size;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -6,7 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
 };
-use yushi_core::{TaskStatus, nbyte::Storage};
+use yushi_core::TaskStatus;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -86,15 +87,15 @@ fn draw_task_list(f: &mut Frame, app: &App, area: Rect) {
             let size_str = if task.total_size > 0 {
                 format!(
                     "{} / {}",
-                    Storage::from_bytes(task.downloaded),
-                    Storage::from_bytes(task.total_size)
+                    format_size(task.downloaded),
+                    format_size(task.total_size)
                 )
             } else {
                 "未知大小".to_string()
             };
 
             let speed_str = if task.speed > 0 {
-                format!(" @ {}/s", Storage::from_bytes(task.speed))
+                format!(" @ {}/s", format_size(task.speed))
             } else {
                 String::new()
             };

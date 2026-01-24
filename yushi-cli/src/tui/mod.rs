@@ -45,7 +45,10 @@ async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     event_handler: &mut EventHandler,
-) -> Result<()> {
+) -> Result<()>
+where
+    <B as ratatui::backend::Backend>::Error: Send + Sync + 'static,
+{
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 

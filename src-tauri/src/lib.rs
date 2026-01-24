@@ -7,10 +7,10 @@ use history::{CompletedTask, DownloadHistory};
 use std::{path::PathBuf, sync::Arc};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
-use yushi_core::{queue::DownloadQueue, types::DownloadTask};
+use yushi_core::{YuShi, types::DownloadTask};
 
 struct AppState {
-    queue: Arc<DownloadQueue>,
+    queue: Arc<YuShi>,
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
     history: Arc<RwLock<DownloadHistory>>,
@@ -181,8 +181,8 @@ pub fn run() {
                     .unwrap_or_default()
             });
 
-            // Initialize DownloadQueue with config
-            let (queue, mut rx) = DownloadQueue::new(
+            // Initialize YuShi with queue functionality
+            let (queue, mut rx) = YuShi::new_with_queue(
                 config.max_concurrent_downloads,
                 config.max_concurrent_tasks,
                 queue_path,
@@ -194,7 +194,7 @@ pub fn run() {
             // Load existing tasks
             let queue_clone = queue.clone();
             tauri::async_runtime::spawn(async move {
-                let _ = queue_clone.load_from_state().await;
+                let _ = queue_clone.load_queue_from_state().await;
             });
 
             // Spawn event listener
