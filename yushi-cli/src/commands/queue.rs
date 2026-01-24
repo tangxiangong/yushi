@@ -6,7 +6,9 @@ use crate::{
 use anyhow::{Result, anyhow};
 use console::style;
 use std::path::PathBuf;
-use yushi_core::{ChecksumType, Priority, QueueEvent, YuShi};
+use yushi_core::{
+    ChecksumType, DownloaderEvent, Priority, ProgressEvent, TaskEvent, VerificationEvent, YuShi,
+};
 
 pub async fn execute(args: QueueArgs) -> Result<()> {
     match args.command {
@@ -38,7 +40,7 @@ async fn add_task(
     sha256: Option<String>,
 ) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     // 加载现有队列
     queue.load_queue_from_state().await?;
@@ -74,7 +76,7 @@ async fn add_task(
 
 async fn list_tasks() -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     queue.load_queue_from_state().await?;
     let tasks = queue.get_all_tasks().await;
@@ -136,7 +138,7 @@ async fn list_tasks() -> Result<()> {
 
 async fn start_queue(max_tasks: usize, connections: usize) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, mut event_rx) = YuShi::new_with_queue(connections, max_tasks, queue_path);
+    let (queue, mut event_rx) = YuShi::new(connections, max_tasks, queue_path);
 
     queue.load_queue_from_state().await?;
 
@@ -162,16 +164,16 @@ async fn start_queue(max_tasks: usize, connections: usize) -> Result<()> {
     let event_handle = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
-                QueueEvent::TaskStarted { task_id } => {
+                DownloaderEvent::Task(TaskEvent::Started { task_id }) => {
                     println!("🚀 开始: {}", &task_id[..8]);
                 }
-                QueueEvent::TaskProgress {
+                DownloaderEvent::Progress(ProgressEvent::Updated {
                     task_id,
                     downloaded,
                     total,
                     speed,
                     ..
-                } => {
+                }) => {
                     progress_mgr
                         .update_progress(&task_id, downloaded, speed)
                         .await;
@@ -182,17 +184,20 @@ async fn start_queue(max_tasks: usize, connections: usize) -> Result<()> {
                         progress_mgr.add_task(task_id, None).await;
                     }
                 }
-                QueueEvent::TaskCompleted { task_id } => {
+                DownloaderEvent::Task(TaskEvent::Completed { task_id }) => {
                     progress_mgr.finish_task(&task_id, true).await;
                 }
-                QueueEvent::TaskFailed { task_id, error } => {
+                DownloaderEvent::Task(TaskEvent::Failed { task_id, error }) => {
                     progress_mgr.finish_task(&task_id, false).await;
                     eprintln!("❌ 失败 {}: {}", &task_id[..8], error);
                 }
-                QueueEvent::VerifyStarted { task_id } => {
+                DownloaderEvent::Verification(VerificationEvent::Started { task_id }) => {
                     println!("🔍 校验: {}", &task_id[..8]);
                 }
-                QueueEvent::VerifyCompleted { task_id, success } => {
+                DownloaderEvent::Verification(VerificationEvent::Completed {
+                    task_id,
+                    success,
+                }) => {
                     if success {
                         println!("✅ 校验通过: {}", &task_id[..8]);
                     } else {
@@ -216,7 +221,7 @@ async fn start_queue(max_tasks: usize, connections: usize) -> Result<()> {
 
 async fn pause_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     queue.load_queue_from_state().await?;
     queue.pause_task(&task_id).await?;
@@ -227,7 +232,7 @@ async fn pause_task(task_id: String) -> Result<()> {
 
 async fn resume_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     queue.load_queue_from_state().await?;
     queue.resume_task(&task_id).await?;
@@ -238,7 +243,7 @@ async fn resume_task(task_id: String) -> Result<()> {
 
 async fn cancel_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     queue.load_queue_from_state().await?;
     queue.cancel_task(&task_id).await?;
@@ -249,7 +254,7 @@ async fn cancel_task(task_id: String) -> Result<()> {
 
 async fn remove_task(task_id: String) -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     queue.load_queue_from_state().await?;
     queue.remove_task(&task_id).await?;
@@ -260,7 +265,7 @@ async fn remove_task(task_id: String) -> Result<()> {
 
 async fn clear_completed() -> Result<()> {
     let queue_path = Config::queue_state_path()?;
-    let (queue, _) = YuShi::new_with_queue(4, 1, queue_path);
+    let (queue, _) = YuShi::new(4, 1, queue_path);
 
     queue.load_queue_from_state().await?;
     queue.clear_completed().await?;

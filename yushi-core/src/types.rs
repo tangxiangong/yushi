@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 /// 下载完成回调类型
-pub type DownloadCallback = Arc<
+pub type CompletionCallback = Arc<
     dyn Fn(
             String,
             Result<(), String>,
@@ -12,9 +12,11 @@ pub type DownloadCallback = Arc<
         + Sync,
 >;
 
+// ==================== 枚举类型 ====================
+
 /// 任务优先级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-pub enum Priority {
+pub enum TaskPriority {
     /// 低优先级
     Low = 0,
     #[default]
@@ -24,7 +26,7 @@ pub enum Priority {
     High = 2,
 }
 
-/// 任务状态枚举
+/// 任务状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     /// 等待开始
@@ -50,9 +52,98 @@ pub enum ChecksumType {
     Sha256(String),
 }
 
+// ==================== 事件类型 ====================
+
+/// 下载器事件（统一的事件类型）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DownloaderEvent {
+    /// 任务相关事件
+    Task(TaskEvent),
+    /// 进度相关事件
+    Progress(ProgressEvent),
+    /// 校验相关事件
+    Verification(VerificationEvent),
+}
+
+/// 任务事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TaskEvent {
+    /// 任务已添加
+    Added { task_id: String },
+    /// 任务开始下载
+    Started { task_id: String },
+    /// 任务完成
+    Completed { task_id: String },
+    /// 任务失败
+    Failed { task_id: String, error: String },
+    /// 任务暂停
+    Paused { task_id: String },
+    /// 任务恢复
+    Resumed { task_id: String },
+    /// 任务取消
+    Cancelled { task_id: String },
+}
+
+/// 进度事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProgressEvent {
+    /// 初始化完成，获取到文件总大小
+    Initialized {
+        task_id: String,
+        total_size: Option<u64>,
+    },
+    /// 进度更新
+    Updated {
+        task_id: String,
+        downloaded: u64,
+        total: u64,
+        speed: u64,
+        eta: Option<u64>,
+    },
+    /// 分块下载进度更新（内部使用）
+    ChunkProgress {
+        task_id: String,
+        chunk_index: usize,
+        delta: u64,
+    },
+    /// 流式下载进度更新（内部使用）
+    StreamProgress { task_id: String, downloaded: u64 },
+    /// 下载完成（内部使用）
+    Finished { task_id: String },
+    /// 下载失败（内部使用）
+    Failed { task_id: String, error: String },
+
+    // 向后兼容的变体
+    /// 分块下载进度更新（向后兼容）
+    ChunkDownloading { chunk_index: usize, delta: u64 },
+    /// 流式下载进度更新（向后兼容）
+    StreamDownloading { downloaded: u64 },
+}
+
+/// 校验事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VerificationEvent {
+    /// 校验开始
+    Started { task_id: String },
+    /// 校验完成
+    Completed { task_id: String, success: bool },
+}
+
+// ==================== 兼容性别名 ====================
+
+/// 队列事件（向后兼容）
+pub type QueueEvent = DownloaderEvent;
+/// 任务优先级（向后兼容）
+pub type Priority = TaskPriority;
+/// 下载完成回调（向后兼容）
+pub type DownloadCallback = CompletionCallback;
+
+// ==================== 任务和配置类型 ====================
+
 /// 下载任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadTask {
+pub struct Task {
     /// 任务唯一标识符
     pub id: String,
     /// 下载 URL
@@ -71,7 +162,7 @@ pub struct DownloadTask {
     pub error: Option<String>,
     /// 任务优先级
     #[serde(default)]
-    pub priority: Priority,
+    pub priority: TaskPriority,
     /// 当前下载速度（字节/秒）
     #[serde(default)]
     pub speed: u64,
@@ -86,56 +177,12 @@ pub struct DownloadTask {
     pub checksum: Option<ChecksumType>,
 }
 
-/// 队列事件
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload")]
-pub enum QueueEvent {
-    /// 任务已添加
-    TaskAdded { task_id: String },
-    /// 任务开始下载
-    TaskStarted { task_id: String },
-    /// 任务进度更新
-    TaskProgress {
-        task_id: String,
-        downloaded: u64,
-        total: u64,
-        speed: u64,
-        eta: Option<u64>,
-    },
-    /// 任务完成
-    TaskCompleted { task_id: String },
-    /// 任务失败
-    TaskFailed { task_id: String, error: String },
-    /// 任务暂停
-    TaskPaused { task_id: String },
-    /// 任务恢复
-    TaskResumed { task_id: String },
-    /// 任务取消
-    TaskCancelled { task_id: String },
-    /// 校验开始
-    VerifyStarted { task_id: String },
-    /// 校验完成
-    VerifyCompleted { task_id: String, success: bool },
-}
+/// 下载任务（向后兼容）
+pub type DownloadTask = Task;
 
-/// 单文件下载进度事件
+/// 下载器配置
 #[derive(Debug, Clone)]
-pub enum ProgressEvent {
-    /// 初始化完成，获取到文件总大小（None 表示未知大小）
-    Initialized { total_size: Option<u64> },
-    /// 分块下载进度更新
-    ChunkDownloading { chunk_index: usize, delta: u64 },
-    /// 流式下载进度更新
-    StreamDownloading { downloaded: u64 },
-    /// 下载完成
-    Finished,
-    /// 下载失败
-    Failed(String),
-}
-
-/// 下载配置
-#[derive(Debug, Clone)]
-pub struct DownloadConfig {
+pub struct Config {
     /// 最大并发连接数
     pub max_concurrent: usize,
     /// 分块大小（字节）
@@ -152,7 +199,7 @@ pub struct DownloadConfig {
     pub user_agent: Option<String>,
 }
 
-impl Default for DownloadConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             max_concurrent: 4,
@@ -165,3 +212,6 @@ impl Default for DownloadConfig {
         }
     }
 }
+
+/// 下载配置（向后兼容）
+pub type DownloadConfig = Config;

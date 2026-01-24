@@ -182,7 +182,7 @@ pub fn run() {
             });
 
             // Initialize YuShi with queue functionality
-            let (queue, mut rx) = YuShi::new_with_queue(
+            let (queue, mut rx) = YuShi::new(
                 config.max_concurrent_downloads,
                 config.max_concurrent_tasks,
                 queue_path,

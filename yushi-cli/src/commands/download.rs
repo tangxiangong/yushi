@@ -57,8 +57,12 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
         }
     }
 
+    // 创建临时队列状态文件
+    let temp_dir = std::env::temp_dir();
+    let queue_state_path = temp_dir.join(format!("yushi_temp_{}.json", std::process::id()));
+
     // 创建下载器
-    let downloader = YuShi::with_config(config);
+    let (downloader, _) = YuShi::with_config(config, 1, queue_state_path.clone());
     let (tx, mut rx) = mpsc::channel(1024);
 
     // 进度显示
@@ -69,7 +73,7 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
 
         while let Some(event) = rx.recv().await {
             match event {
-                ProgressEvent::Initialized { total_size } => {
+                ProgressEvent::Initialized { total_size, .. } => {
                     if !quiet {
                         if let Some(size) = total_size {
                             // 分块下载，已知文件大小
@@ -93,6 +97,24 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
                         }
                     }
                 }
+                ProgressEvent::Updated { downloaded: d, .. } => {
+                    downloaded = d;
+                    if let Some(ref bar) = pb {
+                        bar.set_position(downloaded);
+                    }
+                }
+                ProgressEvent::ChunkProgress { delta, .. } => {
+                    downloaded += delta;
+                    if let Some(ref bar) = pb {
+                        bar.set_position(downloaded);
+                    }
+                }
+                ProgressEvent::StreamProgress { downloaded: d, .. } => {
+                    downloaded = d;
+                    if let Some(ref bar) = pb {
+                        bar.set_position(downloaded);
+                    }
+                }
                 ProgressEvent::ChunkDownloading { delta, .. } => {
                     downloaded += delta;
                     if let Some(ref bar) = pb {
@@ -107,14 +129,14 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
                         bar.set_position(downloaded);
                     }
                 }
-                ProgressEvent::Finished => {
+                ProgressEvent::Finished { .. } => {
                     if let Some(bar) = pb.take() {
                         bar.finish_with_message("下载完成");
                     }
                 }
-                ProgressEvent::Failed(e) => {
+                ProgressEvent::Failed { error, .. } => {
                     if let Some(bar) = pb.take() {
-                        bar.finish_with_message(format!("下载失败: {}", e));
+                        bar.finish_with_message(format!("下载失败: {}", error));
                     }
                 }
             }
@@ -123,8 +145,11 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
 
     // 执行下载
     let result = downloader
-        .download(&args.url, output.to_str().unwrap(), tx)
+        .download(&args.url, output.to_str().unwrap(), Some(tx))
         .await;
+
+    // 清理临时队列状态文件
+    let _ = std::fs::remove_file(queue_state_path);
 
     progress_handle.await?;
 

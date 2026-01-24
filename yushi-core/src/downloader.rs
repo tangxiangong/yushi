@@ -1,8 +1,8 @@
 use crate::{
-    state::{ChunkState, DownloadState, QueueState},
+    state::{ChunkState, DownloadState, QueueState, current_timestamp},
     types::{
-        ChecksumType, DownloadCallback, DownloadConfig, DownloadTask, Priority, ProgressEvent,
-        QueueEvent, TaskStatus,
+        ChecksumType, CompletionCallback, Config, DownloaderEvent, ProgressEvent, Task, TaskEvent,
+        TaskPriority, TaskStatus, VerificationEvent,
     },
     utils::{SpeedCalculator, SpeedLimiter, auto_rename, verify_file},
 };
@@ -26,18 +26,17 @@ use tokio::{
 };
 use uuid::Uuid;
 
-/// 单文件下载器和队列管理器
 #[derive(Clone)]
 pub struct YuShi {
     client: Client,
-    config: DownloadConfig,
+    config: Config,
     // 队列相关字段
-    tasks: Arc<RwLock<HashMap<String, DownloadTask>>>,
+    tasks: Arc<RwLock<HashMap<String, Task>>>,
     active_downloads: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     max_concurrent_tasks: usize,
-    queue_state_path: Option<PathBuf>,
-    queue_event_tx: Option<mpsc::Sender<QueueEvent>>,
-    on_complete: Option<DownloadCallback>,
+    queue_state_path: PathBuf,
+    queue_event_tx: mpsc::Sender<DownloaderEvent>,
+    on_complete: Option<CompletionCallback>,
 }
 
 impl std::fmt::Debug for YuShi {
@@ -46,53 +45,13 @@ impl std::fmt::Debug for YuShi {
             .field("config", &self.config)
             .field("max_concurrent_tasks", &self.max_concurrent_tasks)
             .field("queue_state_path", &self.queue_state_path)
-            .field("has_queue_event_tx", &self.queue_event_tx.is_some())
             .field("has_on_complete", &self.on_complete.is_some())
             .finish()
     }
 }
 
 impl YuShi {
-    /// 创建新的下载器实例（单文件模式）
-    ///
-    /// # 参数
-    /// * `max_concurrent` - 最大并发连接数（分块下载）
-    pub fn new(max_concurrent: usize) -> Self {
-        let config = DownloadConfig {
-            max_concurrent,
-            ..Default::default()
-        };
-        Self::with_config(config)
-    }
-
-    /// 使用自定义配置创建下载器（单文件模式）
-    pub fn with_config(config: DownloadConfig) -> Self {
-        let mut builder = Client::builder()
-            .tcp_keepalive(Duration::from_secs(60))
-            .timeout(Duration::from_secs(config.timeout));
-
-        // 设置代理
-        if let Some(proxy_url) = &config.proxy
-            && let Ok(proxy) = Proxy::all(proxy_url)
-        {
-            builder = builder.proxy(proxy);
-        }
-
-        let client = builder.build().unwrap();
-
-        Self {
-            client,
-            config,
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            active_downloads: Arc::new(RwLock::new(HashMap::new())),
-            max_concurrent_tasks: 1, // 单文件模式默认为1
-            queue_state_path: None,
-            queue_event_tx: None,
-            on_complete: None,
-        }
-    }
-
-    /// 创建带队列功能的下载器
+    /// 创建新的下载器实例
     ///
     /// # 参数
     /// * `max_concurrent_downloads` - 每个任务的最大并发下载连接数
@@ -101,24 +60,32 @@ impl YuShi {
     ///
     /// # 返回
     /// 返回下载器实例和队列事件接收器
-    pub fn new_with_queue(
+    pub fn new(
         max_concurrent_downloads: usize,
         max_concurrent_tasks: usize,
         queue_state_path: PathBuf,
-    ) -> (Self, mpsc::Receiver<QueueEvent>) {
-        let config = DownloadConfig {
+    ) -> (Self, mpsc::Receiver<DownloaderEvent>) {
+        let config = Config {
             max_concurrent: max_concurrent_downloads,
             ..Default::default()
         };
-        Self::with_config_and_queue(config, max_concurrent_tasks, queue_state_path)
+        Self::with_config(config, max_concurrent_tasks, queue_state_path)
     }
 
-    /// 使用自定义配置创建带队列功能的下载器
-    pub fn with_config_and_queue(
-        config: DownloadConfig,
+    /// 使用自定义配置创建下载器
+    ///
+    /// # 参数
+    /// * `config` - 下载配置
+    /// * `max_concurrent_tasks` - 队列中同时运行的最大任务数
+    /// * `queue_state_path` - 队列状态持久化文件路径
+    ///
+    /// # 返回
+    /// 返回下载器实例和队列事件接收器
+    pub fn with_config(
+        config: Config,
         max_concurrent_tasks: usize,
         queue_state_path: PathBuf,
-    ) -> (Self, mpsc::Receiver<QueueEvent>) {
+    ) -> (Self, mpsc::Receiver<DownloaderEvent>) {
         let (event_tx, event_rx) = mpsc::channel(1024);
 
         let mut builder = Client::builder()
@@ -139,20 +106,15 @@ impl YuShi {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             active_downloads: Arc::new(RwLock::new(HashMap::new())),
             max_concurrent_tasks,
-            queue_state_path: Some(queue_state_path),
-            queue_event_tx: Some(event_tx),
+            queue_state_path,
+            queue_event_tx: event_tx,
             on_complete: None,
         };
 
         (downloader, event_rx)
     }
 
-    /// 检查是否启用了队列功能
-    pub fn has_queue(&self) -> bool {
-        self.queue_state_path.is_some() && self.queue_event_tx.is_some()
-    }
-
-    /// 设置下载完成回调（仅队列模式）
+    /// 设置下载完成回调
     pub fn set_on_complete<F, Fut>(&mut self, callback: F)
     where
         F: Fn(String, Result<(), String>) -> Fut + Send + Sync + 'static,
@@ -163,13 +125,69 @@ impl YuShi {
         }));
     }
 
-    /// 下载文件
+    /// 简单下载文件（单文件下载的便捷方法）
+    ///
+    /// # 参数
+    /// * `url` - 下载 URL
+    /// * `dest` - 目标文件路径
+    /// * `event_tx` - 进度事件发送器（可选）
+    pub async fn download(
+        &self,
+        url: &str,
+        dest: &str,
+        event_tx: Option<mpsc::Sender<ProgressEvent>>,
+    ) -> Result<()> {
+        // 添加任务到队列
+        let task_id = self.add_task(url.to_string(), PathBuf::from(dest)).await?;
+
+        // 等待任务完成
+        loop {
+            let task = self.get_task(&task_id).await;
+            if let Some(task) = task {
+                match task.status {
+                    TaskStatus::Completed => return Ok(()),
+                    TaskStatus::Failed => {
+                        return Err(anyhow!(
+                            task.error.unwrap_or_else(|| "Unknown error".to_string())
+                        ));
+                    }
+                    TaskStatus::Cancelled => {
+                        return Err(anyhow!("Task was cancelled"));
+                    }
+                    _ => {
+                        // 如果提供了进度事件发送器，发送进度更新
+                        if let Some(tx) = &event_tx {
+                            if task.total_size > 0 {
+                                let _ = tx
+                                    .send(ProgressEvent::ChunkDownloading {
+                                        chunk_index: 0,
+                                        delta: 0, // 这里不发送增量，只是为了兼容
+                                    })
+                                    .await;
+                            } else {
+                                let _ = tx
+                                    .send(ProgressEvent::StreamDownloading {
+                                        downloaded: task.downloaded,
+                                    })
+                                    .await;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            } else {
+                return Err(anyhow!("Task not found"));
+            }
+        }
+    }
+
+    /// 内部下载方法（由队列任务调用）
     ///
     /// # 参数
     /// * `url` - 下载 URL
     /// * `dest` - 目标文件路径
     /// * `event_tx` - 进度事件发送器
-    pub async fn download(
+    async fn download_internal(
         &self,
         url: &str,
         dest: &str,
@@ -189,7 +207,10 @@ impl YuShi {
         };
 
         event_tx
-            .send(ProgressEvent::Initialized { total_size })
+            .send(ProgressEvent::Initialized {
+                task_id: "internal".to_string(),
+                total_size,
+            })
             .await?;
 
         if is_streaming {
@@ -251,7 +272,11 @@ impl YuShi {
         }
 
         file.flush().await?;
-        event_tx.send(ProgressEvent::Finished).await?;
+        event_tx
+            .send(ProgressEvent::Finished {
+                task_id: "internal".to_string(),
+            })
+            .await?;
         Ok(())
     }
 
@@ -311,7 +336,11 @@ impl YuShi {
         }
 
         fs::remove_file(state_path).await?;
-        event_tx.send(ProgressEvent::Finished).await?;
+        event_tx
+            .send(ProgressEvent::Finished {
+                task_id: "internal".to_string(),
+            })
+            .await?;
         Ok(())
     }
 
@@ -487,14 +516,9 @@ impl YuShi {
 
     // ==================== 队列管理方法 ====================
 
-    /// 从持久化状态加载队列（仅队列模式）
+    /// 从持久化状态加载队列
     pub async fn load_queue_from_state(&self) -> Result<()> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
-        let queue_state_path = self.queue_state_path.as_ref().unwrap();
-        if let Some(state) = QueueState::load(queue_state_path).await? {
+        if let Some(state) = QueueState::load(&self.queue_state_path).await? {
             let mut tasks = self.tasks.write().await;
             for task in state.tasks {
                 tasks.insert(task.id.clone(), task);
@@ -505,16 +529,16 @@ impl YuShi {
 
     /// 保存队列状态
     async fn save_queue_state(&self) -> Result<()> {
-        if !self.has_queue() {
-            return Ok(());
-        }
-
-        let queue_state_path = self.queue_state_path.as_ref().unwrap();
         let tasks = self.tasks.read().await;
-        let task_list: Vec<DownloadTask> = tasks.values().cloned().collect();
+        let task_list: Vec<Task> = tasks.values().cloned().collect();
 
-        let state = QueueState { tasks: task_list };
-        state.save(queue_state_path).await?;
+        let state = QueueState {
+            version: "1.0".to_string(),
+            tasks: task_list,
+            created_at: current_timestamp(),
+            updated_at: current_timestamp(),
+        };
+        state.save(&self.queue_state_path).await?;
         Ok(())
     }
 
@@ -527,10 +551,7 @@ impl YuShi {
     /// # 返回
     /// 返回任务 ID
     pub async fn add_task(&self, url: String, dest: PathBuf) -> Result<String> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-        self.add_task_with_options(url, dest, Priority::Normal, None, false)
+        self.add_task_with_options(url, dest, TaskPriority::Normal, None, false)
             .await
     }
 
@@ -549,14 +570,10 @@ impl YuShi {
         &self,
         url: String,
         mut dest: PathBuf,
-        priority: Priority,
+        priority: TaskPriority,
         checksum: Option<ChecksumType>,
         auto_rename_on_conflict: bool,
     ) -> Result<String> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
         // 自动重命名
         if auto_rename_on_conflict && dest.exists() {
             dest = auto_rename(&dest);
@@ -564,7 +581,7 @@ impl YuShi {
 
         let task_id = Uuid::new_v4().to_string();
 
-        let task = DownloadTask {
+        let task = Task {
             id: task_id.clone(),
             url,
             dest,
@@ -589,13 +606,12 @@ impl YuShi {
         }
 
         self.save_queue_state().await?;
-        if let Some(tx) = &self.queue_event_tx {
-            let _ = tx
-                .send(QueueEvent::TaskAdded {
-                    task_id: task_id.clone(),
-                })
-                .await;
-        }
+        let _ = self
+            .queue_event_tx
+            .send(DownloaderEvent::Task(TaskEvent::Added {
+                task_id: task_id.clone(),
+            }))
+            .await;
 
         // 尝试启动任务
         self.process_queue().await?;
@@ -605,16 +621,12 @@ impl YuShi {
 
     /// 处理队列，启动待处理的任务（按优先级排序）
     async fn process_queue(&self) -> Result<()> {
-        if !self.has_queue() {
-            return Ok(());
-        }
-
         let active_count = self.active_downloads.read().await.len();
         if active_count >= self.max_concurrent_tasks {
             return Ok(());
         }
 
-        let mut pending_tasks: Vec<(String, Priority)> = {
+        let mut pending_tasks: Vec<(String, TaskPriority)> = {
             let tasks = self.tasks.read().await;
             tasks
                 .values()
@@ -653,13 +665,12 @@ impl YuShi {
         };
 
         self.save_queue_state().await?;
-        if let Some(tx) = &self.queue_event_tx {
-            let _ = tx
-                .send(QueueEvent::TaskStarted {
-                    task_id: task_id.to_string(),
-                })
-                .await;
-        }
+        let _ = self
+            .queue_event_tx
+            .send(DownloaderEvent::Task(TaskEvent::Started {
+                task_id: task_id.to_string(),
+            }))
+            .await;
 
         let downloader = self.clone();
         let tasks = Arc::clone(&self.tasks);
@@ -683,7 +694,7 @@ impl YuShi {
 
                 while let Some(event) = rx.recv().await {
                     match event {
-                        ProgressEvent::Initialized { total_size } => {
+                        ProgressEvent::Initialized { total_size, .. } => {
                             if let Some(size) = total_size {
                                 total = size;
                             }
@@ -710,17 +721,15 @@ impl YuShi {
                                 task.eta = eta;
                             }
 
-                            if let Some(tx) = &queue_event_tx_clone {
-                                let _ = tx
-                                    .send(QueueEvent::TaskProgress {
-                                        task_id: task_id_clone.clone(),
-                                        downloaded,
-                                        total,
-                                        speed,
-                                        eta,
-                                    })
-                                    .await;
-                            }
+                            let _ = queue_event_tx_clone
+                                .send(DownloaderEvent::Progress(ProgressEvent::Updated {
+                                    task_id: task_id_clone.clone(),
+                                    downloaded,
+                                    total,
+                                    speed,
+                                    eta,
+                                }))
+                                .await;
                         }
                         ProgressEvent::StreamDownloading {
                             downloaded: stream_downloaded,
@@ -737,27 +746,28 @@ impl YuShi {
                                 task.eta = None; // 流式下载无法预估剩余时间
                             }
 
-                            if let Some(tx) = &queue_event_tx_clone {
-                                let _ = tx
-                                    .send(QueueEvent::TaskProgress {
-                                        task_id: task_id_clone.clone(),
-                                        downloaded,
-                                        total: 0, // 流式下载时 total 为 0
-                                        speed,
-                                        eta: None,
-                                    })
-                                    .await;
-                            }
+                            let _ = queue_event_tx_clone
+                                .send(DownloaderEvent::Progress(ProgressEvent::Updated {
+                                    task_id: task_id_clone.clone(),
+                                    downloaded,
+                                    total: 0, // 流式下载时 total 为 0
+                                    speed,
+                                    eta: None,
+                                }))
+                                .await;
                         }
-                        ProgressEvent::Finished => {}
-                        ProgressEvent::Failed(_) => {}
+                        ProgressEvent::Finished { .. } => {}
+                        ProgressEvent::Failed { .. } => {}
+                        ProgressEvent::Updated { .. } => {}
+                        ProgressEvent::ChunkProgress { .. } => {}
+                        ProgressEvent::StreamProgress { .. } => {}
                     }
                 }
             });
 
             // 执行下载
             let result = downloader
-                .download(&task.url, task.dest.to_str().unwrap(), tx)
+                .download_internal(&task.url, task.dest.to_str().unwrap(), tx)
                 .await;
 
             // 文件校验
@@ -765,24 +775,22 @@ impl YuShi {
             let dest_path = task.dest.clone();
             let verify_result = if result.is_ok() {
                 if let Some(checksum_value) = checksum {
-                    if let Some(tx) = &queue_event_tx {
-                        let _ = tx
-                            .send(QueueEvent::VerifyStarted {
-                                task_id: task_id_owned.clone(),
-                            })
-                            .await;
-                    }
+                    let _ = queue_event_tx
+                        .send(DownloaderEvent::Verification(VerificationEvent::Started {
+                            task_id: task_id_owned.clone(),
+                        }))
+                        .await;
 
                     match verify_file(&dest_path, &checksum_value).await {
                         Ok(success) => {
-                            if let Some(tx) = &queue_event_tx {
-                                let _ = tx
-                                    .send(QueueEvent::VerifyCompleted {
+                            let _ = queue_event_tx
+                                .send(DownloaderEvent::Verification(
+                                    VerificationEvent::Completed {
                                         task_id: task_id_owned.clone(),
                                         success,
-                                    })
-                                    .await;
-                            }
+                                    },
+                                ))
+                                .await;
                             if success {
                                 Ok(())
                             } else {
@@ -809,36 +817,35 @@ impl YuShi {
                 match verify_result {
                     Ok(_) => {
                         task.status = TaskStatus::Completed;
-                        if let Some(tx) = &queue_event_tx {
-                            let _ = tx
-                                .send(QueueEvent::TaskCompleted {
-                                    task_id: task_id_owned.clone(),
-                                })
-                                .await;
-                        }
+                        let _ = queue_event_tx
+                            .send(DownloaderEvent::Task(TaskEvent::Completed {
+                                task_id: task_id_owned.clone(),
+                            }))
+                            .await;
                     }
                     Err(e) => {
                         task.status = TaskStatus::Failed;
                         task.error = Some(e.to_string());
-                        if let Some(tx) = &queue_event_tx {
-                            let _ = tx
-                                .send(QueueEvent::TaskFailed {
-                                    task_id: task_id_owned.clone(),
-                                    error: e.to_string(),
-                                })
-                                .await;
-                        }
+                        let _ = queue_event_tx
+                            .send(DownloaderEvent::Task(TaskEvent::Failed {
+                                task_id: task_id_owned.clone(),
+                                error: e.to_string(),
+                            }))
+                            .await;
                     }
                 }
             }
 
             // 保存状态
-            if let Some(queue_state_path) = queue_state_path {
-                let task_list: Vec<DownloadTask> = tasks.values().cloned().collect();
-                let state = QueueState { tasks: task_list };
-                if let Ok(data) = serde_json::to_string_pretty(&state) {
-                    let _ = fs::write(&queue_state_path, data).await;
-                }
+            let task_list: Vec<Task> = tasks.values().cloned().collect();
+            let state = QueueState {
+                version: "1.0".to_string(),
+                tasks: task_list,
+                created_at: current_timestamp(),
+                updated_at: current_timestamp(),
+            };
+            if let Ok(data) = serde_json::to_string_pretty(&state) {
+                let _ = fs::write(&queue_state_path, data).await;
             }
 
             // 调用完成回调
@@ -860,10 +867,6 @@ impl YuShi {
 
     /// 暂停任务
     pub async fn pause_task(&self, task_id: &str) -> Result<()> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
         let mut tasks = self.tasks.write().await;
         let task = tasks
             .get_mut(task_id)
@@ -881,13 +884,12 @@ impl YuShi {
             drop(active);
 
             self.save_queue_state().await?;
-            if let Some(tx) = &self.queue_event_tx {
-                let _ = tx
-                    .send(QueueEvent::TaskPaused {
-                        task_id: task_id.to_string(),
-                    })
-                    .await;
-            }
+            let _ = self
+                .queue_event_tx
+                .send(DownloaderEvent::Task(TaskEvent::Paused {
+                    task_id: task_id.to_string(),
+                }))
+                .await;
         }
 
         Ok(())
@@ -895,10 +897,6 @@ impl YuShi {
 
     /// 恢复任务
     pub async fn resume_task(&self, task_id: &str) -> Result<()> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
         {
             let mut tasks = self.tasks.write().await;
             let task = tasks
@@ -910,13 +908,12 @@ impl YuShi {
                 drop(tasks);
 
                 self.save_queue_state().await?;
-                if let Some(tx) = &self.queue_event_tx {
-                    let _ = tx
-                        .send(QueueEvent::TaskResumed {
-                            task_id: task_id.to_string(),
-                        })
-                        .await;
-                }
+                let _ = self
+                    .queue_event_tx
+                    .send(DownloaderEvent::Task(TaskEvent::Resumed {
+                        task_id: task_id.to_string(),
+                    }))
+                    .await;
             }
         }
 
@@ -926,10 +923,6 @@ impl YuShi {
 
     /// 取消任务
     pub async fn cancel_task(&self, task_id: &str) -> Result<()> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
         // 如果正在下载，先停止
         let mut active = self.active_downloads.write().await;
         if let Some(handle) = active.remove(task_id) {
@@ -949,13 +942,12 @@ impl YuShi {
         drop(tasks);
 
         self.save_queue_state().await?;
-        if let Some(tx) = &self.queue_event_tx {
-            let _ = tx
-                .send(QueueEvent::TaskCancelled {
-                    task_id: task_id.to_string(),
-                })
-                .await;
-        }
+        let _ = self
+            .queue_event_tx
+            .send(DownloaderEvent::Task(TaskEvent::Cancelled {
+                task_id: task_id.to_string(),
+            }))
+            .await;
 
         // 处理队列中的下一个任务
         self.process_queue().await?;
@@ -965,10 +957,6 @@ impl YuShi {
 
     /// 移除已完成或已取消的任务
     pub async fn remove_task(&self, task_id: &str) -> Result<()> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get(task_id)
             && (task.status == TaskStatus::Completed
@@ -984,23 +972,19 @@ impl YuShi {
     }
 
     /// 获取所有任务
-    pub async fn get_all_tasks(&self) -> Vec<DownloadTask> {
+    pub async fn get_all_tasks(&self) -> Vec<Task> {
         let tasks = self.tasks.read().await;
         tasks.values().cloned().collect()
     }
 
     /// 获取单个任务
-    pub async fn get_task(&self, task_id: &str) -> Option<DownloadTask> {
+    pub async fn get_task(&self, task_id: &str) -> Option<Task> {
         let tasks = self.tasks.read().await;
         tasks.get(task_id).cloned()
     }
 
     /// 清空所有已完成的任务
     pub async fn clear_completed(&self) -> Result<()> {
-        if !self.has_queue() {
-            return Err(anyhow!("Queue functionality not enabled"));
-        }
-
         let mut tasks = self.tasks.write().await;
         tasks.retain(|_, task| task.status != TaskStatus::Completed);
         drop(tasks);

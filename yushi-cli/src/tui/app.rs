@@ -2,7 +2,10 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-use yushi_core::{DownloadTask, Priority, QueueEvent, TaskStatus, YuShi};
+use yushi_core::{
+    DownloadTask, DownloaderEvent, Priority, ProgressEvent, QueueEvent, TaskEvent, TaskStatus,
+    YuShi,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -29,7 +32,7 @@ pub struct App {
 
 impl App {
     pub async fn new(queue_path: PathBuf) -> Result<Self> {
-        let (queue, event_rx) = YuShi::new_with_queue(4, 2, queue_path);
+        let (queue, event_rx) = YuShi::new(4, 2, queue_path);
         queue.load_queue_from_state().await?;
         let tasks = queue.get_all_tasks().await;
 
@@ -224,7 +227,7 @@ impl App {
         // 处理队列事件
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                QueueEvent::TaskProgress { task_id, .. } => {
+                DownloaderEvent::Progress(ProgressEvent::Updated { task_id, .. }) => {
                     // 更新任务进度
                     if let Some(task) = self.queue.get_task(&task_id).await
                         && let Some(idx) = self.tasks.iter().position(|t| t.id == task_id)
@@ -232,11 +235,11 @@ impl App {
                         self.tasks[idx] = task;
                     }
                 }
-                QueueEvent::TaskCompleted { task_id } => {
+                DownloaderEvent::Task(TaskEvent::Completed { task_id }) => {
                     self.status_message = format!("任务完成: {}", &task_id[..8]);
                     self.refresh_tasks().await?;
                 }
-                QueueEvent::TaskFailed { task_id, error } => {
+                DownloaderEvent::Task(TaskEvent::Failed { task_id, error }) => {
                     self.status_message = format!("任务失败: {} - {}", &task_id[..8], error);
                     self.refresh_tasks().await?;
                 }
