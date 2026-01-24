@@ -11,7 +11,7 @@
     "npm:clsx@^2.1.1": "2.1.1",
     "npm:daisyui@^5.5.14": "5.5.14",
     "npm:date-fns@^4.1.0": "4.1.0",
-    "npm:lucide-react@0.562": "0.562.0_react@19.2.3",
+    "npm:lucide-react@0.563": "0.563.0_react@19.2.3",
     "npm:react-dom@^19.2.3": "19.2.3_react@19.2.3",
     "npm:react@^19.2.3": "19.2.3",
     "npm:tailwind-merge@^3.4.0": "3.4.0",
@@ -879,8 +879,8 @@
         "yallist"
       ]
     },
-    "lucide-react@0.562.0_react@19.2.3": {
-      "integrity": "sha512-82hOAu7y0dbVuFfmO4bYF1XEwYk/mEbM5E+b1jgci/udUBEE/R7LF5Ip0CCEmXe8AybRM8L+04eP+LGZeDvkiw==",
+    "lucide-react@0.563.0_react@19.2.3": {
+      "integrity": "sha512-8dXPB2GI4dI8jV4MgUDGBeLdGk8ekfqVZ0BdLcrRzocGgG75ltNEmWS+gE7uokKF/0oSUuczNDT+g9hFJ23FkA==",
       "dependencies": [
         "react"
       ]
@@ -1034,7 +1034,7 @@
         "npm:clsx@^2.1.1",
         "npm:daisyui@^5.5.14",
         "npm:date-fns@^4.1.0",
-        "npm:lucide-react@0.562",
+        "npm:lucide-react@0.563",
         "npm:react-dom@^19.2.3",
         "npm:react@^19.2.3",
         "npm:tailwind-merge@^3.4.0",
