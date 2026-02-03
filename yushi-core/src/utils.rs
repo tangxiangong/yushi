@@ -1,5 +1,4 @@
-use crate::types::ChecksumType;
-use anyhow::Result;
+use crate::{Result, types::ChecksumType};
 use fs_err::tokio as fs;
 use md5::{Digest, Md5};
 use sha2::Sha256;

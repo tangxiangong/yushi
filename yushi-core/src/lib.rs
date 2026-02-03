@@ -3,9 +3,12 @@
 //! 提供统一的下载和队列管理功能，支持断点续传、并发下载等特性。
 
 pub mod downloader;
+pub mod error;
 pub mod state;
 pub mod types;
 pub mod utils;
+
+pub use error::*;
 
 // 重新导出公共 API
 pub use downloader::YuShi;

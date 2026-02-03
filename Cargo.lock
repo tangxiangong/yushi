@@ -6554,7 +6554,6 @@ dependencies = [
 name = "yushi-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "fs-err",
  "futures",
  "hex",

@@ -167,7 +167,7 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
                     }
                     Err(e) => {
                         print_error(&format!("MD5 校验错误: {}", e));
-                        return Err(e);
+                        return Err(e.into());
                     }
                 }
             }
@@ -183,7 +183,7 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
                     }
                     Err(e) => {
                         print_error(&format!("SHA256 校验错误: {}", e));
-                        return Err(e);
+                        return Err(e.into());
                     }
                 }
             }
@@ -193,7 +193,7 @@ pub async fn execute(args: DownloadArgs) -> Result<()> {
         }
         Err(e) => {
             print_error(&format!("下载失败: {}", e));
-            Err(e)
+            Err(e.into())
         }
     }
 }

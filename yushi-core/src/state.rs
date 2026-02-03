@@ -1,5 +1,4 @@
-use crate::types::Task;
-use anyhow::Result;
+use crate::{Result, types::Task};
 use fs_err::tokio as fs;
 use serde::{Deserialize, Serialize};
 use std::path::Path;

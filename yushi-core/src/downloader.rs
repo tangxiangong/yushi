@@ -1,4 +1,5 @@
 use crate::{
+    Error, Result,
     state::{ChunkState, DownloadState, QueueState, current_timestamp},
     types::{
         ChecksumType, CompletionCallback, Config, DownloaderEvent, ProgressEvent, Task, TaskEvent,
@@ -6,7 +7,6 @@ use crate::{
     },
     utils::{SpeedCalculator, SpeedLimiter, auto_rename, verify_file},
 };
-use anyhow::{Result, anyhow};
 use fs_err::tokio as fs;
 use futures::StreamExt;
 use reqwest::{
@@ -30,7 +30,6 @@ use uuid::Uuid;
 pub struct YuShi {
     client: Client,
     config: Config,
-    // 队列相关字段
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     active_downloads: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     max_concurrent_tasks: usize,
@@ -117,7 +116,7 @@ impl YuShi {
     /// 设置下载完成回调
     pub fn set_on_complete<F, Fut>(&mut self, callback: F)
     where
-        F: Fn(String, Result<(), String>) -> Fut + Send + Sync + 'static,
+        F: Fn(String, std::result::Result<(), String>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         self.on_complete = Some(Arc::new(move |task_id, result| {
@@ -147,36 +146,34 @@ impl YuShi {
                 match task.status {
                     TaskStatus::Completed => return Ok(()),
                     TaskStatus::Failed => {
-                        return Err(anyhow!(
-                            task.error.unwrap_or_else(|| "Unknown error".to_string())
+                        return Err(Error::TaskFailed(
+                            task.error.unwrap_or_else(|| "Unknown error".to_string()),
                         ));
                     }
                     TaskStatus::Cancelled => {
-                        return Err(anyhow!("Task was cancelled"));
+                        return Err(Error::TaskCancelled);
                     }
                     _ => {
                         // 如果提供了进度事件发送器，发送进度更新
                         if let Some(tx) = &event_tx {
                             if task.total_size > 0 {
-                                let _ = tx
-                                    .send(ProgressEvent::ChunkDownloading {
-                                        chunk_index: 0,
-                                        delta: 0, // 这里不发送增量，只是为了兼容
-                                    })
-                                    .await;
+                                tx.send(ProgressEvent::ChunkDownloading {
+                                    chunk_index: 0,
+                                    delta: 0, // 这里不发送增量，只是为了兼容
+                                })
+                                .await?;
                             } else {
-                                let _ = tx
-                                    .send(ProgressEvent::StreamDownloading {
-                                        downloaded: task.downloaded,
-                                    })
-                                    .await;
+                                tx.send(ProgressEvent::StreamDownloading {
+                                    downloaded: task.downloaded,
+                                })
+                                .await?;
                             }
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             } else {
-                return Err(anyhow!("Task not found"));
+                return Err(Error::TaskNotFound);
             }
         }
     }
@@ -244,7 +241,7 @@ impl YuShi {
 
         let response = request.send().await?;
         if !response.status().is_success() {
-            return Err(anyhow!("HTTP error: {}", response.status()));
+            return Err(Error::HttpError(response.status().to_string()));
         }
 
         let mut file = fs::File::create(dest).await?;
@@ -256,7 +253,7 @@ impl YuShi {
             .map(|limit| Arc::new(RwLock::new(SpeedLimiter::new(limit))));
 
         while let Some(item) = stream.next().await {
-            let chunk_data = item.map_err(|e| anyhow!("Stream error: {}", e))?;
+            let chunk_data = item.map_err(|e| Error::StreamError(e.to_string()))?;
             file.write_all(&chunk_data).await?;
 
             let len = chunk_data.len() as u64;
@@ -396,7 +393,7 @@ impl YuShi {
                     let mut current_idx = start_pos;
 
                     while let Some(item) = stream.next().await {
-                        let chunk_data = item.map_err(|e| anyhow!("Stream error: {}", e))?;
+                        let chunk_data = item.map_err(|e| Error::StreamError(e.to_string()))?;
                         file.write_all(&chunk_data).await?;
 
                         let len = chunk_data.len() as u64;
@@ -431,11 +428,10 @@ impl YuShi {
                 _ => {
                     retry_count += 1;
                     if retry_count > MAX_RETRIES {
-                        return Err(anyhow!(
+                        return Err(Error::HttpError(format!(
                             "Chunk {} failed after {} retries",
-                            index,
-                            MAX_RETRIES
-                        ));
+                            index, MAX_RETRIES
+                        )));
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -652,9 +648,7 @@ impl YuShi {
     async fn start_queue_task(&self, task_id: &str) -> Result<()> {
         let task = {
             let mut tasks = self.tasks.write().await;
-            let task = tasks
-                .get_mut(task_id)
-                .ok_or_else(|| anyhow!("Task not found"))?;
+            let task = tasks.get_mut(task_id).ok_or(Error::TaskNotFound)?;
 
             if task.status != TaskStatus::Pending && task.status != TaskStatus::Paused {
                 return Ok(());
@@ -794,7 +788,7 @@ impl YuShi {
                             if success {
                                 Ok(())
                             } else {
-                                Err(anyhow!("Checksum verification failed"))
+                                Err(Error::ChecksumVerificationFailed)
                             }
                         }
                         Err(e) => Err(e),
@@ -868,9 +862,7 @@ impl YuShi {
     /// 暂停任务
     pub async fn pause_task(&self, task_id: &str) -> Result<()> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks
-            .get_mut(task_id)
-            .ok_or_else(|| anyhow!("Task not found"))?;
+        let task = tasks.get_mut(task_id).ok_or(Error::TaskNotFound)?;
 
         if task.status == TaskStatus::Downloading {
             // 取消当前的下载任务
@@ -899,9 +891,7 @@ impl YuShi {
     pub async fn resume_task(&self, task_id: &str) -> Result<()> {
         {
             let mut tasks = self.tasks.write().await;
-            let task = tasks
-                .get_mut(task_id)
-                .ok_or_else(|| anyhow!("Task not found"))?;
+            let task = tasks.get_mut(task_id).ok_or(Error::TaskNotFound)?;
 
             if task.status == TaskStatus::Paused {
                 task.status = TaskStatus::Pending;
@@ -968,7 +958,7 @@ impl YuShi {
             self.save_queue_state().await?;
             return Ok(());
         }
-        Err(anyhow!("Cannot remove task in current status"))
+        Err(Error::CannotRemoveTaskInCurrentStatus)
     }
 
     /// 获取所有任务
