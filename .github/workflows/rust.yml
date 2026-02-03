@@ -4,25 +4,25 @@ on:
   push:
     branches: ["main"]
     paths:
-      - '**/*.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '!**/*.md'
-      - '!src/**'
-      - '!deno.json'
-      - '!deno.lock'
-      - '!package.json'
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "!**/*.md"
+      - "!src/**"
+      - "!deno.json"
+      - "!deno.lock"
+      - "!package.json"
   pull_request:
     branches: ["main"]
     paths:
-      - '**/*.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '!**/*.md'
-      - '!src/**'
-      - '!deno.json'
-      - '!deno.lock'
-      - '!package.json'
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "!**/*.md"
+      - "!src/**"
+      - "!deno.json"
+      - "!deno.lock"
+      - "!package.json"
 permissions:
   contents: read
 
